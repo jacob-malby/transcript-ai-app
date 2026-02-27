@@ -12,3 +12,8 @@ export function sseHeaders() {
 export function sseEvent(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
+
+// Comment lines in SSE are allowed and useful as heartbeat.
+export function sseComment(text: string) {
+  return `: ${text}\n\n`;
+}

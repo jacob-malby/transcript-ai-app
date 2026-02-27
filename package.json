@@ -9,7 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@upstash/redis": "^1.36.2",
     "@vercel/blob": "^2.3.0",
+    "@vercel/functions": "^3.4.3",
     "docx": "^9.6.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.575.0",

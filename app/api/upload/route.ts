@@ -21,12 +21,16 @@ export async function POST(req: Request) {
       });
     }
 
-    // ✅ PUBLIC store => must use access: "public"
+    // PUBLIC store => must use access: "public"
     const blob = await put(`uploads/${crypto.randomUUID()}-${file.name}`, file, {
       access: "public",
     });
 
-    return new Response(JSON.stringify({ blobUrl: blob.url, filename: file.name }), {
+    // Optional: return a jobId that the client can use later.
+    // You may also choose to ignore this and just start jobs in /api/process.
+    const jobId = crypto.randomUUID();
+
+    return new Response(JSON.stringify({ blobUrl: blob.url, filename: file.name, jobId }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
