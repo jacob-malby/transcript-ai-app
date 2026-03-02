@@ -383,9 +383,26 @@ export async function GET(req: Request) {
       // Send immediate "connected"
       send("stage", { key: "connected", label: "Connected", current: 0, total: 1 });
 
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        try {
+          controller.close();
+        } catch {
+          // already closed
+        }
+      };
+
       // Heartbeat to keep the connection alive
       const heartbeat = setInterval(() => {
-        controller.enqueue(encoder.encode(sseComment(`ping ${Date.now()}`)));
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(sseComment(`ping ${Date.now()}`)));
+        } catch {
+          close();
+        }
       }, 15000);
 
       let lastSent = "";
@@ -396,10 +413,8 @@ export async function GET(req: Request) {
           const state = await getJob(jobId);
 
           if (!state) {
-            // If job vanished, end.
             send("server_error", { message: "Job not found", time: nowISO() });
-            clearInterval(heartbeat);
-            controller.close();
+            close();
             return;
           }
 
@@ -417,15 +432,13 @@ export async function GET(req: Request) {
 
             if (state.status === "done") {
               send("done", { downloadUrl: state.downloadUrl, filename: state.filename });
-              clearInterval(heartbeat);
-              controller.close();
+              close();
               return;
             }
 
             if (state.status === "error") {
               send("server_error", state.error ?? { message: "Unknown error", time: nowISO() });
-              clearInterval(heartbeat);
-              controller.close();
+              close();
               return;
             }
           }
@@ -436,9 +449,12 @@ export async function GET(req: Request) {
           console.error("SSE POLL ERROR:", err);
           const message =
             err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
-          send("server_error", { message, time: nowISO() });
-          clearInterval(heartbeat);
-          controller.close();
+          try {
+            send("server_error", { message, time: nowISO() });
+          } catch {
+            // controller may already be closed
+          }
+          close();
         }
       };
 

@@ -14,6 +14,7 @@ import {
   Presentation,
   Users,
   BookOpen,
+  AlertCircle,
 } from "lucide-react";
 
 type Progress = {
@@ -49,16 +50,26 @@ type LastJob = {
   infographicTitle: string;
   targetAudience: string;
   selections: OutputSelections;
+  uploadedFilename?: string;
   blobUrl?: string | null;
   createdAt: string;
 };
+
+function formatJobCompletedAt(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch {
+    return iso;
+  }
+}
 
 export default function Page() {
   const [file, setFile] = useState<File | null>(null);
 
   const [outputSelections, setOutputSelections] = useState<OutputSelections>(() => ({ ...DEFAULT_SELECTIONS }));
 
-  const [baseName, setBaseName] = useState("Episode Outputs");
+  const [baseName, setBaseName] = useState("");
   const [blogTopic, setBlogTopic] = useState("");
   const [infographicTitle, setInfographicTitle] = useState("");
   const [targetAudience, setTargetAudience] = useState("");
@@ -69,7 +80,13 @@ export default function Page() {
   const [jobId, setJobId] = useState<string | null>(null);
 
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [downloadFilename, setDownloadFilename] = useState<string>("Outputs.zip");
   const [statusText, setStatusText] = useState<string>("");
+
+  const [completedJobInfo, setCompletedJobInfo] = useState<{ filename: string; completedAt: string } | null>(null);
+
+  const [validating, setValidating] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   const [progress, setProgress] = useState<Record<string, Progress>>({});
   const progressList = useMemo(() => Object.entries(progress), [progress]);
@@ -82,11 +99,17 @@ export default function Page() {
     if (f) {
       // New file = new run
       setFile(f);
+      setValidationError(null);
       setOutputSelections({ ...DEFAULT_SELECTIONS });
+      setBaseName("");
+      setBlogTopic("");
+      setInfographicTitle("");
+      setTargetAudience("");
       setBlobUrl(null);
       setDownloadUrl(null);
+      setDownloadFilename("Outputs.zip");
+      setCompletedJobInfo(null);
       setProgress({});
-      setStatusText("File selected. Ready to generate.");
       setRunning(false);
       setJobId(null);
       downloadedOnceRef.current = false;
@@ -99,6 +122,27 @@ export default function Page() {
 
       // Clear last job since we’re starting over with a new file
       localStorage.removeItem(LS_KEY);
+
+      // Validate transcript format as soon as file is dropped
+      setValidating(true);
+      setStatusText("Validating transcript format…");
+      const fd = new FormData();
+      fd.append("file", f);
+      fetch("/api/validate-transcript", { method: "POST", body: fd })
+        .then((res) => res.json())
+        .then((json) => {
+          if (json.valid) {
+            setStatusText("File selected. Ready to generate.");
+          } else {
+            setValidationError(json.error ?? "Invalid transcript format.");
+            setStatusText("Validation failed.");
+          }
+        })
+        .catch(() => {
+          setValidationError("Could not validate the document. Please try again.");
+          setStatusText("Validation failed.");
+        })
+        .finally(() => setValidating(false));
     }
   };
 
@@ -156,7 +200,7 @@ export default function Page() {
     const body = {
       jobId: preferredJobId, // optional
       blobUrl: url,
-      baseName,
+      baseName: baseName.trim() || "Outputs",
       blogTopic: outputSelections.blog ? blogTopic : "",
       infographicTitle: outputSelections.infographic ? infographicTitle : "",
       targetAudience: outputSelections.infographic ? targetAudience : "",
@@ -246,6 +290,11 @@ export default function Page() {
 
         if (dl) {
           setDownloadUrl(dl);
+          setDownloadFilename(fn);
+          setCompletedJobInfo({
+            filename: file?.name ?? "Transcript",
+            completedAt: new Date().toISOString(),
+          });
           setStatusText("Done! Downloading ZIP…");
 
           // Download immediately if tab is open and we haven't already done so.
@@ -290,7 +339,7 @@ export default function Page() {
 
     setJobId(last.jobId);
     setOutputSelections(last.selections ?? { ...DEFAULT_SELECTIONS });
-    setBaseName(last.baseName || "Episode Outputs");
+    setBaseName(last.baseName ?? "");
     setBlogTopic(last.blogTopic || "");
     setInfographicTitle(last.infographicTitle || "");
     setTargetAudience(last.targetAudience || "");
@@ -321,18 +370,13 @@ export default function Page() {
     if (state.status === "done") {
       setRunning(false);
       setDownloadUrl(state.downloadUrl ?? null);
+      setDownloadFilename(state.filename ?? "Outputs.zip");
+      setCompletedJobInfo({
+        filename: last.uploadedFilename ?? "Transcript",
+        completedAt: last.createdAt,
+      });
       setStatusText("Job complete. Download ready.");
-
-      // If user reopened the tab after completion, auto-download once.
-      if (state.downloadUrl && !downloadedOnceRef.current) {
-        downloadedOnceRef.current = true;
-        const a = document.createElement("a");
-        a.href = state.downloadUrl;
-        a.download = state.filename || "Outputs.zip";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
+      // Do NOT auto-download on resume - user came back to the page, just show the button.
       return;
     }
 
@@ -384,6 +428,7 @@ export default function Page() {
         infographicTitle,
         targetAudience,
         selections: outputSelections,
+        uploadedFilename: file?.name,
         blobUrl: url,
         createdAt: new Date().toISOString(),
       });
@@ -403,6 +448,7 @@ export default function Page() {
   const hasFile = !!file;
   const rejected = fileRejections?.length > 0;
   const hasAnySelection = Object.values(outputSelections).some(Boolean);
+  const canGenerate = hasFile && hasAnySelection && !validationError && !validating;
 
   return (
     <main style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0b3a7a 0%, #0ea5e9 45%, #60a5fa 100%)" }}>
@@ -448,33 +494,11 @@ export default function Page() {
                 backdropFilter: "blur(10px)",
               }}
             >
-              {running ? <Loader2 size={16} className="spin" /> : downloadUrl ? <CheckCircle2 size={16} /> : <UploadCloud size={16} />}
+              {running || validating ? <Loader2 size={16} className="spin" /> : downloadUrl ? <CheckCircle2 size={16} /> : <UploadCloud size={16} />}
               <span style={{ fontSize: 13, fontWeight: 600 }}>
                 {statusText || (hasFile ? "File selected. Ready to generate." : "Waiting for a .docx transcript…")}
               </span>
             </div>
-
-            {downloadUrl && (
-              <a
-                href={downloadUrl}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "8px 12px",
-                  borderRadius: 999,
-                  background: "rgba(255,255,255,0.95)",
-                  color: "#0b3a7a",
-                  textDecoration: "none",
-                  fontSize: 13,
-                  fontWeight: 800,
-                  boxShadow: "0 10px 22px rgba(0,0,0,0.18)",
-                }}
-              >
-                <Download size={16} />
-                Download ZIP
-              </a>
-            )}
           </div>
         </header>
 
@@ -572,29 +596,50 @@ export default function Page() {
                 </div>
               )}
 
-              {hasFile && (
+              {validationError && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: 12,
+                    borderRadius: 14,
+                    background: "#fef2f2",
+                    border: "1px solid #fecaca",
+                    color: "#b91c1c",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 10,
+                  }}
+                >
+                  <AlertCircle size={20} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>{validationError}</span>
+                </div>
+              )}
+
+              {hasFile && !validationError && (
                 <OutputChecklist
                   selections={outputSelections}
                   onChange={setOutputSelections}
-                  disabled={running}
+                  disabled={running || validating}
                 />
               )}
 
               {/* Generate button */}
               <button
                 onClick={start}
-                disabled={!file || running || !hasAnySelection}
+                disabled={!canGenerate || running}
                 style={{
                   marginTop: 14,
                   width: "100%",
                   padding: "12px 14px",
                   borderRadius: 14,
                   border: "1px solid rgba(2, 132, 199, 0.35)",
-                  background: !file || running || !hasAnySelection ? "#e2e8f0" : "linear-gradient(135deg, #0284c7, #0ea5e9)",
-                  color: !file || running || !hasAnySelection ? "#64748b" : "white",
+                  background: !canGenerate || running ? "#e2e8f0" : "linear-gradient(135deg, #0284c7, #0ea5e9)",
+                  color: !canGenerate || running ? "#64748b" : "white",
                   fontWeight: 900,
-                  cursor: !file || running || !hasAnySelection ? "not-allowed" : "pointer",
-                  boxShadow: !file || running || !hasAnySelection ? "none" : "0 14px 30px rgba(2,132,199,0.28)",
+                  cursor: !canGenerate || running ? "not-allowed" : "pointer",
+                  boxShadow: !canGenerate || running ? "none" : "0 14px 30px rgba(2,132,199,0.28)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -618,6 +663,7 @@ export default function Page() {
               {downloadUrl && (
                 <a
                   href={downloadUrl}
+                  download={downloadFilename}
                   style={{
                     marginTop: 10,
                     width: "100%",
@@ -629,13 +675,21 @@ export default function Page() {
                     fontWeight: 900,
                     textDecoration: "none",
                     display: "flex",
+                    flexDirection: "column",
                     alignItems: "center",
                     justifyContent: "center",
-                    gap: 10,
+                    gap: 4,
                   }}
                 >
-                  <Download size={18} />
-                  Download ZIP
+                  <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <Download size={18} />
+                    Download ZIP from previous job
+                  </span>
+                  {completedJobInfo && (
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>
+                      {completedJobInfo.filename} • {formatJobCompletedAt(completedJobInfo.completedAt)}
+                    </span>
+                  )}
                 </a>
               )}
 
@@ -686,8 +740,8 @@ export default function Page() {
                   hint="Used to name files inside the ZIP"
                   value={baseName}
                   onChange={setBaseName}
-                  placeholder="e.g. Episode 12"
-                  disabled={!hasFile || running}
+                  placeholder="E### [Guest Name]"
+                  disabled={!hasFile || running || !!validationError}
                 />
 
                 {outputSelections.blog && (
@@ -698,7 +752,7 @@ export default function Page() {
                     value={blogTopic}
                     onChange={setBlogTopic}
                     placeholder="e.g. Ethics & confidentiality in practice"
-                    disabled={!hasFile || running}
+                    disabled={!hasFile || running || !!validationError}
                   />
                 )}
 
@@ -711,7 +765,7 @@ export default function Page() {
                       value={infographicTitle}
                       onChange={setInfographicTitle}
                       placeholder="e.g. 5 takeaways for busy lawyers"
-                      disabled={!hasFile || running}
+                      disabled={!hasFile || running || !!validationError}
                     />
                     <Field
                       icon={<Users size={16} color="#0b3a7a" />}
@@ -720,7 +774,7 @@ export default function Page() {
                       value={targetAudience}
                       onChange={setTargetAudience}
                       placeholder="e.g. work in commercial litigation and need practical tips"
-                      disabled={!hasFile || running}
+                      disabled={!hasFile || running || !!validationError}
                     />
                   </>
                 )}
