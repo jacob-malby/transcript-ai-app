@@ -14,7 +14,6 @@ import {
   Presentation,
   Users,
   BookOpen,
-  Mail,
 } from "lucide-react";
 
 type Progress = {
@@ -28,31 +27,36 @@ function pct(current: number, total: number) {
   return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
 }
 
-const EMAIL_SUGGESTIONS = ["taylor.harding@htlp.com.au", "jacob.malby@htlp.com.au"] as const;
-
 const LS_KEY = "transcript-ai:lastJob";
+
+type OutputKey = "transcript" | "summary" | "quiz" | "interview" | "infographic" | "blog";
+
+type OutputSelections = Record<OutputKey, boolean>;
+
+const DEFAULT_SELECTIONS: OutputSelections = {
+  transcript: true,
+  summary: true,
+  quiz: true,
+  interview: true,
+  infographic: true,
+  blog: true,
+};
 
 type LastJob = {
   jobId: string;
-  email: string;
   baseName: string;
   blogTopic: string;
   infographicTitle: string;
   targetAudience: string;
+  selections: OutputSelections;
   blobUrl?: string | null;
   createdAt: string;
 };
 
-function isValidEmail(v: string) {
-  if (!v) return false;
-  // Simple, pragmatic validation
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
-}
-
 export default function Page() {
   const [file, setFile] = useState<File | null>(null);
 
-  const [email, setEmail] = useState<string>(EMAIL_SUGGESTIONS[0]);
+  const [outputSelections, setOutputSelections] = useState<OutputSelections>(() => ({ ...DEFAULT_SELECTIONS }));
 
   const [baseName, setBaseName] = useState("Episode Outputs");
   const [blogTopic, setBlogTopic] = useState("");
@@ -78,6 +82,7 @@ export default function Page() {
     if (f) {
       // New file = new run
       setFile(f);
+      setOutputSelections({ ...DEFAULT_SELECTIONS });
       setBlobUrl(null);
       setDownloadUrl(null);
       setProgress({});
@@ -152,12 +157,10 @@ export default function Page() {
       jobId: preferredJobId, // optional
       blobUrl: url,
       baseName,
-      blogTopic,
-      infographicTitle,
-      targetAudience,
-      // NOTE: The server currently ignores email unless you add it to the job state.
-      // We'll keep sending it so it's ready when you add server-side email later.
-      email: email.trim(),
+      blogTopic: outputSelections.blog ? blogTopic : "",
+      infographicTitle: outputSelections.infographic ? infographicTitle : "",
+      targetAudience: outputSelections.infographic ? targetAudience : "",
+      selections: outputSelections,
     };
 
     const res = await fetch("/api/process", {
@@ -286,7 +289,7 @@ export default function Page() {
     if (!last?.jobId) return;
 
     setJobId(last.jobId);
-    setEmail(last.email || EMAIL_SUGGESTIONS[0]);
+    setOutputSelections(last.selections ?? { ...DEFAULT_SELECTIONS });
     setBaseName(last.baseName || "Episode Outputs");
     setBlogTopic(last.blogTopic || "");
     setInfographicTitle(last.infographicTitle || "");
@@ -357,11 +360,6 @@ export default function Page() {
   async function start() {
     if (!file) return;
 
-    if (!isValidEmail(email)) {
-      alert("Please enter a valid email address.");
-      return;
-    }
-
     setRunning(true);
     setDownloadUrl(null);
     setProgress({});
@@ -381,11 +379,11 @@ export default function Page() {
       // Persist job so the user can close the tab and resume later
       saveLastJob({
         jobId: newJobId,
-        email: email.trim(),
         baseName,
         blogTopic,
         infographicTitle,
         targetAudience,
+        selections: outputSelections,
         blobUrl: url,
         createdAt: new Date().toISOString(),
       });
@@ -404,6 +402,7 @@ export default function Page() {
 
   const hasFile = !!file;
   const rejected = fileRejections?.length > 0;
+  const hasAnySelection = Object.values(outputSelections).some(Boolean);
 
   return (
     <main style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0b3a7a 0%, #0ea5e9 45%, #60a5fa 100%)" }}>
@@ -573,21 +572,29 @@ export default function Page() {
                 </div>
               )}
 
+              {hasFile && (
+                <OutputChecklist
+                  selections={outputSelections}
+                  onChange={setOutputSelections}
+                  disabled={running}
+                />
+              )}
+
               {/* Generate button */}
               <button
                 onClick={start}
-                disabled={!file || running || !isValidEmail(email)}
+                disabled={!file || running || !hasAnySelection}
                 style={{
                   marginTop: 14,
                   width: "100%",
                   padding: "12px 14px",
                   borderRadius: 14,
                   border: "1px solid rgba(2, 132, 199, 0.35)",
-                  background: !file || running || !isValidEmail(email) ? "#e2e8f0" : "linear-gradient(135deg, #0284c7, #0ea5e9)",
-                  color: !file || running || !isValidEmail(email) ? "#64748b" : "white",
+                  background: !file || running || !hasAnySelection ? "#e2e8f0" : "linear-gradient(135deg, #0284c7, #0ea5e9)",
+                  color: !file || running || !hasAnySelection ? "#64748b" : "white",
                   fontWeight: 900,
-                  cursor: !file || running || !isValidEmail(email) ? "not-allowed" : "pointer",
-                  boxShadow: !file || running || !isValidEmail(email) ? "none" : "0 14px 30px rgba(2,132,199,0.28)",
+                  cursor: !file || running || !hasAnySelection ? "not-allowed" : "pointer",
+                  boxShadow: !file || running || !hasAnySelection ? "none" : "0 14px 30px rgba(2,132,199,0.28)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -673,13 +680,6 @@ export default function Page() {
               </div>
 
               <div style={{ display: "grid", gap: 12 }}>
-                {/* Email */}
-                <EmailField
-                  value={email}
-                  onChange={setEmail}
-                  disabled={!hasFile || running}
-                />
-
                 <Field
                   icon={<ClipboardList size={16} color="#0b3a7a" />}
                   label="Output base name"
@@ -690,35 +690,40 @@ export default function Page() {
                   disabled={!hasFile || running}
                 />
 
-                <Field
-                  icon={<BookOpen size={16} color="#0b3a7a" />}
-                  label="Blog topic"
-                  hint="Short topic/title for the generated blog post"
-                  value={blogTopic}
-                  onChange={setBlogTopic}
-                  placeholder="e.g. Ethics & confidentiality in practice"
-                  disabled={!hasFile || running}
-                />
+                {outputSelections.blog && (
+                  <Field
+                    icon={<BookOpen size={16} color="#0b3a7a" />}
+                    label="Blog topic"
+                    hint="Short topic/title for the generated blog post"
+                    value={blogTopic}
+                    onChange={setBlogTopic}
+                    placeholder="e.g. Ethics & confidentiality in practice"
+                    disabled={!hasFile || running}
+                  />
+                )}
 
-                <Field
-                  icon={<Presentation size={16} color="#0b3a7a" />}
-                  label="Infographic title"
-                  hint="Shown at the top of the infographic content"
-                  value={infographicTitle}
-                  onChange={setInfographicTitle}
-                  placeholder="e.g. 5 takeaways for busy lawyers"
-                  disabled={!hasFile || running}
-                />
-
-                <Field
-                  icon={<Users size={16} color="#0b3a7a" />}
-                  label="Target audience"
-                  hint="Finish the sentence: “lawyers who…”"
-                  value={targetAudience}
-                  onChange={setTargetAudience}
-                  placeholder="e.g. work in commercial litigation and need practical tips"
-                  disabled={!hasFile || running}
-                />
+                {outputSelections.infographic && (
+                  <>
+                    <Field
+                      icon={<Presentation size={16} color="#0b3a7a" />}
+                      label="Infographic title"
+                      hint="Shown at the top of the infographic content"
+                      value={infographicTitle}
+                      onChange={setInfographicTitle}
+                      placeholder="e.g. 5 takeaways for busy lawyers"
+                      disabled={!hasFile || running}
+                    />
+                    <Field
+                      icon={<Users size={16} color="#0b3a7a" />}
+                      label="Target audience"
+                      hint="Finish the sentence: “lawyers who…”"
+                      value={targetAudience}
+                      onChange={setTargetAudience}
+                      placeholder="e.g. work in commercial litigation and need practical tips"
+                      disabled={!hasFile || running}
+                    />
+                  </>
+                )}
               </div>
 
               {!hasFile && (
@@ -738,11 +743,6 @@ export default function Page() {
                 </div>
               )}
 
-              {hasFile && !isValidEmail(email) && (
-                <div style={{ marginTop: 10, color: "#b91c1c", fontSize: 13, fontWeight: 800 }}>
-                  Please enter a valid email address (used for delivery if the tab is closed).
-                </div>
-              )}
             </section>
           </div>
 
@@ -802,62 +802,64 @@ export default function Page() {
   );
 }
 
-function EmailField(props: {
-  value: string;
-  onChange: (v: string) => void;
+function OutputChecklist(props: {
+  selections: OutputSelections;
+  onChange: (s: OutputSelections) => void;
   disabled?: boolean;
 }) {
-  const valid = isValidEmail(props.value);
+  const items: { key: OutputKey; label: string }[] = [
+    { key: "transcript", label: "Transcript" },
+    { key: "summary", label: "Summary" },
+    { key: "quiz", label: "Quiz" },
+    { key: "interview", label: "Virtual Interview" },
+    { key: "infographic", label: "Infographic" },
+    { key: "blog", label: "Blog" },
+  ];
+
+  const toggle = (key: OutputKey) => {
+    props.onChange({
+      ...props.selections,
+      [key]: !props.selections[key],
+    });
+  };
 
   return (
-    <label style={{ display: "grid", gap: 6 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
+    <div
+      style={{
+        marginTop: 14,
+        padding: 14,
+        borderRadius: 14,
+        background: "#f8fafc",
+        border: "1px solid rgba(0,0,0,0.06)",
+      }}
+    >
+      <div style={{ fontWeight: 900, color: "#0f172a", marginBottom: 10, fontSize: 13 }}>
+        Outputs to generate
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map(({ key, label }) => (
+          <label
+            key={key}
             style={{
-              width: 30,
-              height: 30,
-              borderRadius: 12,
-              background: "#f1f5f9",
-              display: "grid",
-              placeItems: "center",
-              border: "1px solid rgba(0,0,0,0.06)",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              cursor: props.disabled ? "not-allowed" : "pointer",
+              opacity: props.disabled ? 0.7 : 1,
             }}
           >
-            <Mail size={16} color="#0b3a7a" />
-          </span>
-          <span style={{ fontWeight: 900, color: "#0f172a" }}>Email</span>
-        </div>
-        <span style={{ fontSize: 12, color: valid ? "#16a34a" : "#64748b", fontWeight: 800 }}>
-          {valid ? "Looks good" : "Used if tab closes"}
-        </span>
-      </div>
-
-      <input
-        list="email-suggestions"
-        value={props.value}
-        onChange={(e) => props.onChange(e.target.value)}
-        placeholder="name@company.com"
-        disabled={props.disabled}
-        style={{
-          width: "100%",
-          padding: "12px 12px",
-          borderRadius: 14,
-          border: `1px solid ${valid ? "rgba(15,23,42,0.12)" : "rgba(185,28,28,0.35)"}`,
-          background: props.disabled ? "#e2e8f0" : "white",
-          color: props.disabled ? "#64748b" : "#0f172a",
-          outline: "none",
-          fontWeight: 700,
-          boxShadow: "0 8px 18px rgba(2, 132, 199, 0.06)",
-        }}
-      />
-
-      <datalist id="email-suggestions">
-        {EMAIL_SUGGESTIONS.map((e) => (
-          <option key={e} value={e} />
+            <input
+              type="checkbox"
+              checked={props.selections[key]}
+              onChange={() => toggle(key)}
+              disabled={props.disabled}
+              style={{ width: 18, height: 18, accentColor: "#0284c7" }}
+            />
+            <span style={{ fontWeight: 700, color: "#334155", fontSize: 13 }}>{label}</span>
+          </label>
         ))}
-      </datalist>
-    </label>
+      </div>
+    </div>
   );
 }
 

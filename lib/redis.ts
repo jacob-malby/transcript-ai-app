@@ -4,7 +4,7 @@ import { Redis } from "@upstash/redis";
 function pickEnv(...names: string[]) {
   for (const n of names) {
     const v = process.env[n];
-    if (v) return v;
+    if (v && String(v).trim().length > 0) return String(v).trim();
   }
   throw new Error(`Missing env var. Tried: ${names.join(", ")}`);
 }
@@ -16,19 +16,9 @@ export const redis = new Redis({
 
 export type JobStatus = "queued" | "processing" | "done" | "error";
 
-export type JobStage =
-  | "connected"
-  | "download"
-  | "extract"
-  | "parse"
-  | "transcript"
-  | "quiz"
-  | "summary"
-  | "interview"
-  | "infographic"
-  | "blog"
-  | "zip"
-  | "upload";
+export type OutputKey = "transcript" | "quiz" | "summary" | "interview" | "infographic" | "blog";
+
+export type OutputSelections = Record<OutputKey, boolean>;
 
 export type JobProgressItem = {
   key: string;
@@ -44,18 +34,25 @@ export type JobState = {
   createdAt: string;
   updatedAt: string;
 
+  // inputs
   blobUrl?: string;
   baseName?: string;
   blogTopic?: string;
   infographicTitle?: string;
   targetAudience?: string;
 
+  // selections
+  selections?: OutputSelections;
+
+  // progress
   stage?: JobProgressItem;
   progress?: Record<string, JobProgressItem>;
 
+  // result
   downloadUrl?: string;
   filename?: string;
 
+  // error
   error?: {
     message: string;
     stack?: string;
@@ -76,11 +73,7 @@ export async function setJob(jobId: string, next: JobState, ttlSeconds = 60 * 60
   await redis.set(jobKey(jobId), next, { ex: ttlSeconds });
 }
 
-export async function patchJob(
-  jobId: string,
-  patch: Partial<JobState>,
-  ttlSeconds = 60 * 60 * 24
-) {
+export async function patchJob(jobId: string, patch: Partial<JobState>, ttlSeconds = 60 * 60 * 24) {
   const prev = (await getJob(jobId)) ?? null;
   if (!prev) {
     const now = new Date().toISOString();

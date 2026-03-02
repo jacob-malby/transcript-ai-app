@@ -21,6 +21,7 @@ import {
   upsertProgress,
   JobState,
   JobProgressItem,
+  OutputSelections,
 } from "@/lib/redis";
 
 export const runtime = "nodejs";
@@ -32,6 +33,7 @@ type StartBody = {
   blogTopic?: string;
   infographicTitle?: string;
   targetAudience?: string;
+  selections?: OutputSelections;
 };
 
 async function ask(model: string, input: string) {
@@ -97,6 +99,16 @@ async function runJob(jobId: string) {
   const infographicTitle = state.infographicTitle ?? "";
   const targetAudience = state.targetAudience ?? "";
 
+  const defaultSelections: OutputSelections = {
+    transcript: true,
+    summary: true,
+    quiz: true,
+    interview: true,
+    infographic: true,
+    blog: true,
+  };
+  const sel = state.selections ?? defaultSelections;
+
   try {
     await patchJob(jobId, { status: "processing" });
 
@@ -126,90 +138,110 @@ async function runJob(jobId: string) {
 
     await setStage(jobId, "parse", "Parsing transcript", 1, 1);
 
-    // Initialize progress trackers
-    await setProgress(jobId, jobStage("transcript", "Transcript Table", 0, 1));
-    await setProgress(jobId, jobStage("quiz", "Quiz Questions", 0, totalRows));
-    await setProgress(jobId, jobStage("summary", "Summary", 0, totalRows));
-    await setProgress(jobId, jobStage("interview", "Virtual Interview", 0, totalRows));
-    await setProgress(jobId, jobStage("infographic", "Infographic", 0, 1));
-    await setProgress(jobId, jobStage("blog", "Blog Post", 0, 1));
+    // Initialize progress trackers only for selected outputs
+    if (sel.transcript) await setProgress(jobId, jobStage("transcript", "Transcript Table", 0, 1));
+    if (sel.quiz) await setProgress(jobId, jobStage("quiz", "Quiz Questions", 0, totalRows));
+    if (sel.summary) await setProgress(jobId, jobStage("summary", "Summary", 0, totalRows));
+    if (sel.interview) await setProgress(jobId, jobStage("interview", "Virtual Interview", 0, totalRows));
+    if (sel.infographic) await setProgress(jobId, jobStage("infographic", "Infographic", 0, 1));
+    if (sel.blog) await setProgress(jobId, jobStage("blog", "Blog Post", 0, 1));
+
+    const zipEntries: { name: string; data: Buffer }[] = [];
 
     // 1) Transcript table
-    await setStage(jobId, "transcript", "Generating Transcript Table", 0, 1);
-    const transcriptDoc = await buildTranscriptTableDoc(rows);
-    await setProgress(jobId, jobStage("transcript", "Transcript Table", 1, 1));
-    await setStage(jobId, "transcript", "Generating Transcript Table", 1, 1);
+    if (sel.transcript) {
+      await setStage(jobId, "transcript", "Generating Transcript Table", 0, 1);
+      const transcriptDoc = await buildTranscriptTableDoc(rows);
+      await setProgress(jobId, jobStage("transcript", "Transcript Table", 1, 1));
+      await setStage(jobId, "transcript", "Generating Transcript Table", 1, 1);
+      zipEntries.push({ name: `${baseName} - Transcript Table.docx`, data: transcriptDoc });
+    }
 
     // 2) Quiz questions
-    await setStage(jobId, "quiz", "Generating Quiz Questions", 0, 1);
-    const quizItems: { q: string; wrong: string; torf: string }[] = [];
-    for (let i = 0; i < loopRows.length; i++) {
-      const text = loopRows[i].text;
-      if (text.length > 50) {
-        const q = await ask("gpt-4o", prompts.quizQuestion(text));
-        const torf = await ask("gpt-4o", prompts.quizTorF(text));
-        const wrong = await ask("gpt-4o", prompts.quizWrongAnswers(q));
-        quizItems.push({ q, torf, wrong });
+    if (sel.quiz) {
+      await setStage(jobId, "quiz", "Generating Quiz Questions", 0, 1);
+      const quizItems: { q: string; wrong: string; torf: string }[] = [];
+      for (let i = 0; i < loopRows.length; i++) {
+        const text = loopRows[i].text;
+        if (text.length > 50) {
+          const q = await ask("gpt-4o", prompts.quizQuestion(text));
+          const torf = await ask("gpt-4o", prompts.quizTorF(text));
+          const wrong = await ask("gpt-4o", prompts.quizWrongAnswers(q));
+          quizItems.push({ q, torf, wrong });
+        }
+        await setProgress(jobId, jobStage("quiz", "Quiz Questions", i + 1, totalRows));
       }
-      await setProgress(jobId, jobStage("quiz", "Quiz Questions", i + 1, totalRows));
+      const quizDoc = await buildQuizDoc(quizItems);
+      zipEntries.push({ name: `${baseName} - Quiz Questions.docx`, data: Buffer.from(quizDoc) });
     }
-    const quizDoc = await buildQuizDoc(quizItems);
 
-    // 3) Summary
-    await setStage(jobId, "summary", "Generating Summary", 0, 1);
-    const summaryLines: string[] = [];
-    for (let i = 0; i < loopRows.length; i++) {
-      const text = loopRows[i].text;
-      if (text.length > 50) {
-        const s = await ask("gpt-4o-mini", prompts.summarize2Sentences(text));
-        summaryLines.push(s);
+    // 3) Summary (needed for infographic too)
+    let summaryText = "";
+    if (sel.summary || sel.infographic) {
+      await setStage(jobId, "summary", "Generating Summary", 0, 1);
+      const summaryLines: string[] = [];
+      for (let i = 0; i < loopRows.length; i++) {
+        const text = loopRows[i].text;
+        if (text.length > 50) {
+          const s = await ask("gpt-4o-mini", prompts.summarize2Sentences(text));
+          summaryLines.push(s);
+        }
+        await setProgress(jobId, jobStage("summary", "Summary", i + 1, totalRows));
       }
-      await setProgress(jobId, jobStage("summary", "Summary", i + 1, totalRows));
+      summaryText = summaryLines.join("\n");
+      if (sel.summary) {
+        const summaryDoc = await buildSummaryDoc(summaryLines);
+        zipEntries.push({ name: `${baseName} - Summary.docx`, data: Buffer.from(summaryDoc) });
+      }
     }
-    const summaryDoc = await buildSummaryDoc(summaryLines);
-    const summaryText = summaryLines.join("\n");
 
     // 4) Virtual Interview
-    await setStage(jobId, "interview", "Generating Virtual Interview", 0, 1);
-    const interviewItems: { question: string; summary: string }[] = [];
-    for (let i = 0; i < loopRows.length; i++) {
-      const text = loopRows[i].text;
-      if (text.length > 50) {
-        const question = await ask("gpt-4o-mini", prompts.interviewQuestion(text));
-        const summary = await ask("gpt-4o-mini", prompts.interviewSummaryFromQuestion(question, text));
-        interviewItems.push({ question, summary });
+    if (sel.interview) {
+      await setStage(jobId, "interview", "Generating Virtual Interview", 0, 1);
+      const interviewItems: { question: string; summary: string }[] = [];
+      for (let i = 0; i < loopRows.length; i++) {
+        const text = loopRows[i].text;
+        if (text.length > 50) {
+          const question = await ask("gpt-4o-mini", prompts.interviewQuestion(text));
+          const summary = await ask("gpt-4o-mini", prompts.interviewSummaryFromQuestion(question, text));
+          interviewItems.push({ question, summary });
+        }
+        await setProgress(jobId, jobStage("interview", "Virtual Interview", i + 1, totalRows));
       }
-      await setProgress(jobId, jobStage("interview", "Virtual Interview", i + 1, totalRows));
+      const interviewDoc = await buildVirtualInterviewDoc(interviewItems);
+      zipEntries.push({ name: `${baseName} - Virtual Interview.docx`, data: Buffer.from(interviewDoc) });
     }
-    const interviewDoc = await buildVirtualInterviewDoc(interviewItems);
 
-    // 5) Infographic
-    await setStage(jobId, "infographic", "Generating Infographic", 0, 1);
-    const infographicBody = await ask(
-      "gpt-4o",
-      prompts.infographicTips(infographicTitle || "Infographic", targetAudience || "...", summaryText)
-    );
-    const infographicDoc = await buildSimpleParagraphDoc("Infographic", infographicBody);
-    await setProgress(jobId, jobStage("infographic", "Infographic", 1, 1));
+    // 5) Infographic (uses summaryText)
+    if (sel.infographic) {
+      await setStage(jobId, "infographic", "Generating Infographic", 0, 1);
+      const infographicBody = await ask(
+        "gpt-4o",
+        prompts.infographicTips(infographicTitle || "Infographic", targetAudience || "...", summaryText)
+      );
+      const infographicDoc = await buildSimpleParagraphDoc("Infographic", infographicBody);
+      await setProgress(jobId, jobStage("infographic", "Infographic", 1, 1));
+      zipEntries.push({ name: `${baseName} - Infographic.docx`, data: Buffer.from(infographicDoc) });
+    }
 
     // 6) Blog Post
-    await setStage(jobId, "blog", "Generating Blog Post", 0, 1);
-    const combinedText = combinedTextFromRows(rows);
-    const blogBody = await ask("gpt-4o", prompts.blogPost(blogTopic || "Blog topic", combinedText));
-    const blogDoc = await buildSimpleParagraphDoc("Blog Post", blogBody);
-    await setProgress(jobId, jobStage("blog", "Blog Post", 1, 1));
+    if (sel.blog) {
+      await setStage(jobId, "blog", "Generating Blog Post", 0, 1);
+      const combinedText = combinedTextFromRows(rows);
+      const blogBody = await ask("gpt-4o", prompts.blogPost(blogTopic || "Blog topic", combinedText));
+      const blogDoc = await buildSimpleParagraphDoc("Blog Post", blogBody);
+      await setProgress(jobId, jobStage("blog", "Blog Post", 1, 1));
+      zipEntries.push({ name: `${baseName} - Blog Post.docx`, data: Buffer.from(blogDoc) });
+    }
+
+    if (zipEntries.length === 0) {
+      await failJob(jobId, new Error("At least one output must be selected"));
+      return;
+    }
 
     // Zip
     await setStage(jobId, "zip", "Creating ZIP", 0, 1);
-
-    const zip = await makeZip([
-      { name: `${baseName} - Transcript Table.docx`, data: Buffer.from(transcriptDoc) },
-      { name: `${baseName} - Quiz Questions.docx`, data: Buffer.from(quizDoc) },
-      { name: `${baseName} - Summary.docx`, data: Buffer.from(summaryDoc) },
-      { name: `${baseName} - Virtual Interview.docx`, data: Buffer.from(interviewDoc) },
-      { name: `${baseName} - Infographic.docx`, data: Buffer.from(infographicDoc) },
-      { name: `${baseName} - Blog Post.docx`, data: Buffer.from(blogDoc) },
-    ]);
+    const zip = await makeZip(zipEntries);
 
     await setStage(jobId, "zip", "Creating ZIP", 1, 1);
 
@@ -252,6 +284,16 @@ export async function POST(req: Request) {
 
     const jobId = ensureString(body.jobId) ? body.jobId : crypto.randomUUID();
 
+    const defaultSelections: OutputSelections = {
+      transcript: true,
+      summary: true,
+      quiz: true,
+      interview: true,
+      infographic: true,
+      blog: true,
+    };
+    const selections = body.selections ?? defaultSelections;
+
     // Create / update job state in Redis
     const createdAt = nowISO();
     const initial: JobState = {
@@ -264,6 +306,7 @@ export async function POST(req: Request) {
       blogTopic: body.blogTopic ?? "",
       infographicTitle: body.infographicTitle ?? "",
       targetAudience: body.targetAudience ?? "",
+      selections,
       stage: jobStage("connected", "Queued", 0, 1),
       progress: progressInit(),
     };
