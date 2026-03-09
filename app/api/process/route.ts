@@ -13,7 +13,7 @@ import {
   buildSimpleParagraphDoc,
 } from "@/lib/docx-builders";
 import { makeZip } from "@/lib/zip";
-import { sseEvent, sseHeaders, sseComment } from "@/lib/sse";
+import { sseEvent, sseHeaders, sseComment, sseRetry } from "@/lib/sse";
 import {
   getJob,
   patchJob,
@@ -27,7 +27,7 @@ import {
 export const runtime = "nodejs";
 
 type StartBody = {
-  jobId?: string; // optional, client can supply one (e.g. from upload route) or we generate it
+  jobId?: string;
   blobUrl: string;
   baseName?: string;
   blogTopic?: string;
@@ -36,12 +36,8 @@ type StartBody = {
   selections?: OutputSelections;
 };
 
-async function ask(model: string, input: string) {
-  const r = await openai.responses.create({
-    model,
-    input,
-  });
-  return r.output_text?.trim() ?? "";
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function nowISO() {
@@ -77,14 +73,65 @@ async function failJob(jobId: string, err: unknown) {
   });
 }
 
-/**
- * The actual generation job. This runs server-side and writes progress+result into Redis.
- */
+function isRetriableOpenAIError(err: any) {
+  const status = Number(err?.status ?? err?.statusCode ?? 0);
+  const code = String(err?.code ?? "");
+  const message = String(err?.message ?? "").toLowerCase();
+
+  return (
+    status === 408 ||
+    status === 409 ||
+    status === 429 ||
+    status >= 500 ||
+    code === "rate_limit_exceeded" ||
+    code === "api_connection_error" ||
+    message.includes("rate limit") ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("connection") ||
+    message.includes("overloaded")
+  );
+}
+
+async function ask(model: string, input: string, jobId: string, context: string) {
+  const maxAttempts = 6;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const r = await openai.responses.create({
+        model,
+        input,
+      });
+
+      return r.output_text?.trim() ?? "";
+    } catch (err: any) {
+      const retriable = isRetriableOpenAIError(err);
+
+      if (!retriable || attempt === maxAttempts) {
+        throw new Error(`${context} failed after ${attempt} attempt(s): ${err?.message ?? "Unknown OpenAI error"}`);
+      }
+
+      const delay = Math.min(12000, 1000 * Math.pow(2, attempt - 1));
+      await patchJob(jobId, {
+        stage: jobStage(
+          "connected",
+          `${context} hit a temporary issue. Retrying (${attempt}/${maxAttempts})…`,
+          attempt,
+          maxAttempts
+        ),
+      });
+
+      await sleep(delay);
+    }
+  }
+
+  throw new Error(`${context} failed unexpectedly`);
+}
+
 async function runJob(jobId: string) {
   const state = await getJob(jobId);
   if (!state) return;
 
-  // If already done or processing, don't duplicate work.
   if (state.status === "done") return;
   if (state.status === "processing") return;
 
@@ -125,7 +172,6 @@ async function runJob(jobId: string) {
     await setStage(jobId, "download", "Downloading transcript", 1, 1);
     await setStage(jobId, "extract", "Extracting text", 0, 1);
 
-    // Mammoth in Node expects { buffer: Buffer }
     const extracted = await mammoth.extractRawText({ buffer: buf });
     const rawText = extracted.value ?? "";
 
@@ -138,7 +184,6 @@ async function runJob(jobId: string) {
 
     await setStage(jobId, "parse", "Parsing transcript", 1, 1);
 
-    // Initialize progress trackers only for selected outputs
     if (sel.transcript) await setProgress(jobId, jobStage("transcript", "Transcript Table", 0, 1));
     if (sel.quiz) await setProgress(jobId, jobStage("quiz", "Quiz Questions", 0, totalRows));
     if (sel.summary) await setProgress(jobId, jobStage("summary", "Summary", 0, totalRows));
@@ -148,7 +193,6 @@ async function runJob(jobId: string) {
 
     const zipEntries: { name: string; data: Buffer }[] = [];
 
-    // 1) Transcript table
     if (sel.transcript) {
       await setStage(jobId, "transcript", "Generating Transcript Table", 0, 1);
       const transcriptDoc = await buildTranscriptTableDoc(rows);
@@ -157,16 +201,15 @@ async function runJob(jobId: string) {
       zipEntries.push({ name: `${baseName} - Transcript Table.docx`, data: transcriptDoc });
     }
 
-    // 2) Quiz questions
     if (sel.quiz) {
       await setStage(jobId, "quiz", "Generating Quiz Questions", 0, 1);
       const quizItems: { q: string; wrong: string; torf: string }[] = [];
       for (let i = 0; i < loopRows.length; i++) {
         const text = loopRows[i].text;
         if (text.length > 50) {
-          const q = await ask("gpt-4o", prompts.quizQuestion(text));
-          const torf = await ask("gpt-4o", prompts.quizTorF(text));
-          const wrong = await ask("gpt-4o", prompts.quizWrongAnswers(q));
+          const q = await ask("gpt-4o", prompts.quizQuestion(text), jobId, `Quiz question ${i + 1}/${totalRows}`);
+          const torf = await ask("gpt-4o", prompts.quizTorF(text), jobId, `True/False ${i + 1}/${totalRows}`);
+          const wrong = await ask("gpt-4o", prompts.quizWrongAnswers(q), jobId, `Wrong answers ${i + 1}/${totalRows}`);
           quizItems.push({ q, torf, wrong });
         }
         await setProgress(jobId, jobStage("quiz", "Quiz Questions", i + 1, totalRows));
@@ -175,7 +218,6 @@ async function runJob(jobId: string) {
       zipEntries.push({ name: `${baseName} - Quiz Questions.docx`, data: Buffer.from(quizDoc) });
     }
 
-    // 3) Summary (needed for infographic too)
     let summaryText = "";
     if (sel.summary || sel.infographic) {
       await setStage(jobId, "summary", "Generating Summary", 0, 1);
@@ -183,7 +225,7 @@ async function runJob(jobId: string) {
       for (let i = 0; i < loopRows.length; i++) {
         const text = loopRows[i].text;
         if (text.length > 50) {
-          const s = await ask("gpt-4o-mini", prompts.summarize2Sentences(text));
+          const s = await ask("gpt-4o-mini", prompts.summarize2Sentences(text), jobId, `Summary ${i + 1}/${totalRows}`);
           summaryLines.push(s);
         }
         await setProgress(jobId, jobStage("summary", "Summary", i + 1, totalRows));
@@ -195,15 +237,19 @@ async function runJob(jobId: string) {
       }
     }
 
-    // 4) Virtual Interview
     if (sel.interview) {
       await setStage(jobId, "interview", "Generating Virtual Interview", 0, 1);
       const interviewItems: { question: string; summary: string }[] = [];
       for (let i = 0; i < loopRows.length; i++) {
         const text = loopRows[i].text;
         if (text.length > 50) {
-          const question = await ask("gpt-4o-mini", prompts.interviewQuestion(text));
-          const summary = await ask("gpt-4o-mini", prompts.interviewSummaryFromQuestion(question, text));
+          const question = await ask("gpt-4o-mini", prompts.interviewQuestion(text), jobId, `Interview question ${i + 1}/${totalRows}`);
+          const summary = await ask(
+            "gpt-4o-mini",
+            prompts.interviewSummaryFromQuestion(question, text),
+            jobId,
+            `Interview summary ${i + 1}/${totalRows}`
+          );
           interviewItems.push({ question, summary });
         }
         await setProgress(jobId, jobStage("interview", "Virtual Interview", i + 1, totalRows));
@@ -212,23 +258,23 @@ async function runJob(jobId: string) {
       zipEntries.push({ name: `${baseName} - Virtual Interview.docx`, data: Buffer.from(interviewDoc) });
     }
 
-    // 5) Infographic (uses summaryText)
     if (sel.infographic) {
       await setStage(jobId, "infographic", "Generating Infographic", 0, 1);
       const infographicBody = await ask(
         "gpt-4o",
-        prompts.infographicTips(infographicTitle || "Infographic", targetAudience || "...", summaryText)
+        prompts.infographicTips(infographicTitle || "Infographic", targetAudience || "...", summaryText),
+        jobId,
+        "Infographic"
       );
       const infographicDoc = await buildSimpleParagraphDoc("Infographic", infographicBody);
       await setProgress(jobId, jobStage("infographic", "Infographic", 1, 1));
       zipEntries.push({ name: `${baseName} - Infographic.docx`, data: Buffer.from(infographicDoc) });
     }
 
-    // 6) Blog Post
     if (sel.blog) {
       await setStage(jobId, "blog", "Generating Blog Post", 0, 1);
       const combinedText = combinedTextFromRows(rows);
-      const blogBody = await ask("gpt-4o", prompts.blogPost(blogTopic || "Blog topic", combinedText));
+      const blogBody = await ask("gpt-4o", prompts.blogPost(blogTopic || "Blog topic", combinedText), jobId, "Blog post");
       const blogDoc = await buildSimpleParagraphDoc("Blog Post", blogBody);
       await setProgress(jobId, jobStage("blog", "Blog Post", 1, 1));
       zipEntries.push({ name: `${baseName} - Blog Post.docx`, data: Buffer.from(blogDoc) });
@@ -239,13 +285,10 @@ async function runJob(jobId: string) {
       return;
     }
 
-    // Zip
     await setStage(jobId, "zip", "Creating ZIP", 0, 1);
     const zip = await makeZip(zipEntries);
-
     await setStage(jobId, "zip", "Creating ZIP", 1, 1);
 
-    // Upload
     await setStage(jobId, "upload", "Uploading ZIP", 0, 1);
 
     const out = await put(`outputs/${jobId}-${crypto.randomUUID()}-${baseName}.zip`, zip, {
@@ -266,11 +309,6 @@ async function runJob(jobId: string) {
   }
 }
 
-/**
- * POST /api/process
- * Starts a job and returns { jobId } immediately.
- * The job continues on the server (best on Vercel via waitUntil).
- */
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as Partial<StartBody>;
@@ -294,7 +332,6 @@ export async function POST(req: Request) {
     };
     const selections = body.selections ?? defaultSelections;
 
-    // Create / update job state in Redis
     const createdAt = nowISO();
     const initial: JobState = {
       jobId,
@@ -311,7 +348,6 @@ export async function POST(req: Request) {
       progress: progressInit(),
     };
 
-    // If job already exists, keep createdAt but overwrite inputs/status if desired.
     const existing = await getJob(jobId);
     if (existing?.status === "processing") {
       return new Response(JSON.stringify({ error: "Job is already processing", jobId }), {
@@ -325,7 +361,6 @@ export async function POST(req: Request) {
       createdAt: existing?.createdAt ?? initial.createdAt,
     });
 
-    // Kick off background execution
     waitUntil(runJob(jobId));
 
     return new Response(JSON.stringify({ jobId }), {
@@ -343,10 +378,6 @@ export async function POST(req: Request) {
   }
 }
 
-/**
- * GET /api/process?jobId=...
- * Returns job JSON, or SSE if &stream=1
- */
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const jobId = searchParams.get("jobId") ?? "";
@@ -373,14 +404,13 @@ export async function GET(req: Request) {
     });
   }
 
-  // SSE mode (reconnectable): polls Redis and emits updates.
   const s = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
       const send = (event: string, data: unknown) =>
         controller.enqueue(encoder.encode(sseEvent(event, data)));
 
-      // Send immediate "connected"
+      controller.enqueue(encoder.encode(sseRetry(3000)));
       send("stage", { key: "connected", label: "Connected", current: 0, total: 1 });
 
       let closed = false;
@@ -391,11 +421,10 @@ export async function GET(req: Request) {
         try {
           controller.close();
         } catch {
-          // already closed
+          // ignore
         }
       };
 
-      // Heartbeat to keep the connection alive
       const heartbeat = setInterval(() => {
         if (closed) return;
         try {
@@ -407,7 +436,6 @@ export async function GET(req: Request) {
 
       let lastSent = "";
 
-      // Poll loop
       const poll = async () => {
         try {
           const state = await getJob(jobId);
@@ -422,7 +450,6 @@ export async function GET(req: Request) {
           if (serialized !== lastSent) {
             lastSent = serialized;
 
-            // Emit stage + progress snapshots in the same format your client already expects
             if (state.stage) send("stage", state.stage);
             if (state.progress) {
               for (const k of Object.keys(state.progress)) {
@@ -443,18 +470,10 @@ export async function GET(req: Request) {
             }
           }
 
-          // Keep polling
           setTimeout(poll, 1000);
         } catch (err: unknown) {
           console.error("SSE POLL ERROR:", err);
-          const message =
-            err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
-          try {
-            send("server_error", { message, time: nowISO() });
-          } catch {
-            // controller may already be closed
-          }
-          close();
+          setTimeout(poll, 1500);
         }
       };
 
