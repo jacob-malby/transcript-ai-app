@@ -31,10 +31,9 @@ export const runtime = "nodejs";
 
 /**
  * Maximum allowed duration for this Vercel function.
- * Vercel Pro supports up to 300 s; Enterprise supports up to 900 s.
- * Adjust to your plan's limit if needed.
+ * Hobby plan: 300 s max. Pro: 300 s. Enterprise: up to 900 s.
  */
-export const maxDuration = 800;
+export const maxDuration = 300;
 
 /** Number of rows processed in parallel for each output section. */
 const CONCURRENCY = 5;
