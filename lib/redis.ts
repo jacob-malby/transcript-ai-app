@@ -16,7 +16,7 @@ export const redis = new Redis({
 
 export type JobStatus = "queued" | "processing" | "done" | "error";
 
-export type OutputKey = "transcript" | "quiz" | "summary" | "interview" | "infographic" | "blog";
+export type OutputKey = "transcript" | "aiTranscript" | "quiz" | "summary" | "interview" | "infographic" | "blog";
 
 export type OutputSelections = Record<OutputKey, boolean>;
 

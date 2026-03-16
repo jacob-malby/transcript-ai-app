@@ -197,6 +197,7 @@ async function runJob(jobId: string) {
 
   const defaultSelections: OutputSelections = {
     transcript: true,
+    aiTranscript: true,
     summary: true,
     quiz: true,
     interview: true,
@@ -234,6 +235,7 @@ async function runJob(jobId: string) {
     await setStage(jobId, "parse", "Parsing transcript", 1, 1);
 
     if (sel.transcript) await setProgress(jobId, jobStage("transcript", "Transcript Table", 0, 1));
+    if (sel.aiTranscript) await setProgress(jobId, jobStage("aiTranscript", "AI-Assisted Transcript", 0, rows.length || 1));
     if (sel.quiz) await setProgress(jobId, jobStage("quiz", "Quiz Questions", 0, totalRows));
     if (sel.summary) await setProgress(jobId, jobStage("summary", "Summary", 0, totalRows));
     if (sel.interview) await setProgress(jobId, jobStage("interview", "Virtual Interview", 0, totalRows));
@@ -248,6 +250,51 @@ async function runJob(jobId: string) {
       await setProgress(jobId, jobStage("transcript", "Transcript Table", 1, 1));
       await setStage(jobId, "transcript", "Generating Transcript Table", 1, 1);
       zipEntries.push({ name: `${baseName} - Transcript Table.docx`, data: transcriptDoc });
+    }
+
+    if (sel.aiTranscript) {
+      await setStage(jobId, "aiTranscript", "Generating AI-Assisted Transcript", 0, 1);
+
+      const aiTranscriptCheckpoints = await loadRowCheckpoints(jobId, "aiTranscript");
+      let aiTranscriptCompleted = Object.keys(aiTranscriptCheckpoints).length;
+      const totalAiRows = rows.length || 1;
+
+      // Build a mutable copy of rows so we can swap in the AI-cleaned text.
+      const aiRows = rows.map((r) => ({ ...r }));
+
+      // Pre-fill results from checkpoints so we can resume after a timeout.
+      for (const [k, v] of Object.entries(aiTranscriptCheckpoints)) {
+        if (v) aiRows[parseInt(k, 10)].text = v;
+      }
+
+      if (aiTranscriptCompleted > 0) {
+        await setProgress(jobId, jobStage("aiTranscript", "AI-Assisted Transcript", aiTranscriptCompleted, totalAiRows));
+      }
+
+      await runWithConcurrency(rows, CONCURRENCY, async (row, i) => {
+        if (String(i) in aiTranscriptCheckpoints) return; // already done
+
+        const text = row.text;
+        if (text.length > 10) {
+          const cleaned = await ask(
+            "gpt-4o-mini",
+            prompts.aiAssistedTranscript(text),
+            jobId,
+            `AI-Assisted Transcript row ${i + 1}/${totalAiRows}`
+          );
+          aiRows[i].text = cleaned;
+          await saveRowCheckpoint(jobId, "aiTranscript", i, cleaned);
+        } else {
+          await saveRowCheckpoint(jobId, "aiTranscript", i, text);
+        }
+
+        aiTranscriptCompleted++;
+        await setProgress(jobId, jobStage("aiTranscript", "AI-Assisted Transcript", aiTranscriptCompleted, totalAiRows));
+      });
+
+      const aiTranscriptDoc = await buildTranscriptTableDoc(aiRows);
+      await setStage(jobId, "aiTranscript", "Generating AI-Assisted Transcript", 1, 1);
+      zipEntries.push({ name: `${baseName} - AI-Assisted Transcript.docx`, data: aiTranscriptDoc });
     }
 
     if (sel.quiz) {
@@ -440,6 +487,7 @@ async function runJob(jobId: string) {
     if (sel.summary || sel.infographic) deleteRowCheckpoints(jobId, "summary").catch((e) => console.warn("Failed to delete summary checkpoints:", e));
     if (sel.quiz) deleteRowCheckpoints(jobId, "quiz").catch((e) => console.warn("Failed to delete quiz checkpoints:", e));
     if (sel.interview) deleteRowCheckpoints(jobId, "interview").catch((e) => console.warn("Failed to delete interview checkpoints:", e));
+    if (sel.aiTranscript) deleteRowCheckpoints(jobId, "aiTranscript").catch((e) => console.warn("Failed to delete aiTranscript checkpoints:", e));
   } catch (err: unknown) {
     console.error("PROCESS JOB ERROR:", err);
     await failJob(jobId, err);
@@ -461,6 +509,7 @@ export async function POST(req: Request) {
 
     const defaultSelections: OutputSelections = {
       transcript: true,
+      aiTranscript: true,
       summary: true,
       quiz: true,
       interview: true,

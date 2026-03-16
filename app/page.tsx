@@ -30,12 +30,13 @@ function pct(current: number, total: number) {
 
 const LS_KEY = "transcript-ai:lastJob";
 
-type OutputKey = "transcript" | "summary" | "quiz" | "interview" | "infographic" | "blog";
+type OutputKey = "transcript" | "aiTranscript" | "summary" | "quiz" | "interview" | "infographic" | "blog";
 
 type OutputSelections = Record<OutputKey, boolean>;
 
 const DEFAULT_SELECTIONS: OutputSelections = {
   transcript: true,
+  aiTranscript: true,
   summary: true,
   quiz: true,
   interview: true,
@@ -899,6 +900,7 @@ function OutputChecklist(props: {
 }) {
   const items: { key: OutputKey; label: string }[] = [
     { key: "transcript", label: "Transcript" },
+    { key: "aiTranscript", label: "AI-Assisted Transcript" },
     { key: "summary", label: "Summary" },
     { key: "quiz", label: "Quiz" },
     { key: "interview", label: "Virtual Interview" },
