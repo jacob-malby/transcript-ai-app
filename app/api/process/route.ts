@@ -19,12 +19,31 @@ import {
   patchJob,
   progressInit,
   upsertProgress,
+  saveRowCheckpoint,
+  loadRowCheckpoints,
+  deleteRowCheckpoints,
   JobState,
   JobProgressItem,
   OutputSelections,
 } from "@/lib/redis";
 
 export const runtime = "nodejs";
+
+/**
+ * Maximum allowed duration for this Vercel function.
+ * Vercel Pro supports up to 300 s; Enterprise supports up to 900 s.
+ * Adjust to your plan's limit if needed.
+ */
+export const maxDuration = 800;
+
+/** Number of rows processed in parallel for each output section. */
+const CONCURRENCY = 5;
+
+/**
+ * A job stuck in "processing" for longer than this is considered stale and
+ * may be re-triggered by a new POST request or the next runJob invocation.
+ */
+const STALE_PROCESSING_MS = 5 * 60 * 1000; // 5 minutes
 
 type StartBody = {
   jobId?: string;
@@ -128,12 +147,43 @@ async function ask(model: string, input: string, jobId: string, context: string)
   throw new Error(`${context} failed unexpectedly`);
 }
 
+/** Returns true when a job has been stuck in "processing" state long enough to be considered stale. */
+function isStuckInProcessing(state: JobState): boolean {
+  if (state.status !== "processing") return false;
+  const updatedAt = new Date(state.updatedAt).getTime();
+  return Date.now() - updatedAt > STALE_PROCESSING_MS;
+}
+
+/**
+ * Run `fn` over every item in `items`, keeping at most `limit` invocations
+ * running at any one time.  Preserves the order of results.
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      await fn(items[i], i);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 async function runJob(jobId: string) {
   const state = await getJob(jobId);
   if (!state) return;
 
   if (state.status === "done") return;
-  if (state.status === "processing") return;
+
+  // If currently processing, only allow re-run when the job has been stuck
+  // (no Redis update) for longer than STALE_PROCESSING_MS.
+  if (state.status === "processing" && !isStuckInProcessing(state)) return;
 
   if (!ensureString(state.blobUrl)) {
     await failJob(jobId, new Error("Job missing blobUrl"));
@@ -203,17 +253,44 @@ async function runJob(jobId: string) {
 
     if (sel.quiz) {
       await setStage(jobId, "quiz", "Generating Quiz Questions", 0, 1);
-      const quizItems: { q: string; wrong: string; torf: string }[] = [];
-      for (let i = 0; i < loopRows.length; i++) {
-        const text = loopRows[i].text;
+
+      // Load previously saved checkpoints so we can resume after a timeout.
+      const quizCheckpoints = await loadRowCheckpoints(jobId, "quiz");
+      let quizCompleted = Object.keys(quizCheckpoints).length;
+
+      // Pre-fill results array from checkpoints.
+      const quizResults: ({ q: string; torf: string; wrong: string } | null)[] =
+        new Array(loopRows.length).fill(null);
+      for (const [k, v] of Object.entries(quizCheckpoints)) {
+        if (v) quizResults[parseInt(k, 10)] = JSON.parse(v);
+      }
+
+      if (quizCompleted > 0) {
+        await setProgress(jobId, jobStage("quiz", "Quiz Questions", quizCompleted, totalRows));
+      }
+
+      await runWithConcurrency(loopRows, CONCURRENCY, async (row, i) => {
+        if (String(i) in quizCheckpoints) return; // already done
+
+        const text = row.text;
         if (text.length > 50) {
           const q = await ask("gpt-4o", prompts.quizQuestion(text), jobId, `Quiz question ${i + 1}/${totalRows}`);
           const torf = await ask("gpt-4o", prompts.quizTorF(text), jobId, `True/False ${i + 1}/${totalRows}`);
           const wrong = await ask("gpt-4o", prompts.quizWrongAnswers(q), jobId, `Wrong answers ${i + 1}/${totalRows}`);
-          quizItems.push({ q, torf, wrong });
+          const item = { q, torf, wrong };
+          quizResults[i] = item;
+          await saveRowCheckpoint(jobId, "quiz", i, JSON.stringify(item));
+        } else {
+          await saveRowCheckpoint(jobId, "quiz", i, ""); // mark short row as done
         }
-        await setProgress(jobId, jobStage("quiz", "Quiz Questions", i + 1, totalRows));
-      }
+
+        quizCompleted++;
+        await setProgress(jobId, jobStage("quiz", "Quiz Questions", quizCompleted, totalRows));
+      });
+
+      const quizItems = quizResults.filter(
+        (q): q is { q: string; torf: string; wrong: string } => q !== null
+      );
       const quizDoc = await buildQuizDoc(quizItems);
       zipEntries.push({ name: `${baseName} - Quiz Questions.docx`, data: Buffer.from(quizDoc) });
     }
@@ -221,16 +298,42 @@ async function runJob(jobId: string) {
     let summaryText = "";
     if (sel.summary || sel.infographic) {
       await setStage(jobId, "summary", "Generating Summary", 0, 1);
-      const summaryLines: string[] = [];
-      for (let i = 0; i < loopRows.length; i++) {
-        const text = loopRows[i].text;
-        if (text.length > 50) {
-          const s = await ask("gpt-4o-mini", prompts.summarize2Sentences(text), jobId, `Summary ${i + 1}/${totalRows}`);
-          summaryLines.push(s);
-        }
-        await setProgress(jobId, jobStage("summary", "Summary", i + 1, totalRows));
+
+      const summaryCheckpoints = await loadRowCheckpoints(jobId, "summary");
+      let summaryCompleted = Object.keys(summaryCheckpoints).length;
+
+      const summaryResults: (string | null)[] = new Array(loopRows.length).fill(null);
+      for (const [k, v] of Object.entries(summaryCheckpoints)) {
+        summaryResults[parseInt(k, 10)] = v; // may be "" for short rows
       }
+
+      if (summaryCompleted > 0) {
+        await setProgress(jobId, jobStage("summary", "Summary", summaryCompleted, totalRows));
+      }
+
+      await runWithConcurrency(loopRows, CONCURRENCY, async (row, i) => {
+        if (String(i) in summaryCheckpoints) return;
+
+        const text = row.text;
+        let result = "";
+        if (text.length > 50) {
+          result = await ask(
+            "gpt-4o-mini",
+            prompts.summarize2Sentences(text),
+            jobId,
+            `Summary ${i + 1}/${totalRows}`
+          );
+        }
+        summaryResults[i] = result;
+        await saveRowCheckpoint(jobId, "summary", i, result);
+
+        summaryCompleted++;
+        await setProgress(jobId, jobStage("summary", "Summary", summaryCompleted, totalRows));
+      });
+
+      const summaryLines = summaryResults.filter((s): s is string => s !== null && s !== "");
       summaryText = summaryLines.join("\n");
+
       if (sel.summary) {
         const summaryDoc = await buildSummaryDoc(summaryLines);
         zipEntries.push({ name: `${baseName} - Summary.docx`, data: Buffer.from(summaryDoc) });
@@ -239,21 +342,51 @@ async function runJob(jobId: string) {
 
     if (sel.interview) {
       await setStage(jobId, "interview", "Generating Virtual Interview", 0, 1);
-      const interviewItems: { question: string; summary: string }[] = [];
-      for (let i = 0; i < loopRows.length; i++) {
-        const text = loopRows[i].text;
+
+      const interviewCheckpoints = await loadRowCheckpoints(jobId, "interview");
+      let interviewCompleted = Object.keys(interviewCheckpoints).length;
+
+      const interviewResults: ({ question: string; summary: string } | null)[] =
+        new Array(loopRows.length).fill(null);
+      for (const [k, v] of Object.entries(interviewCheckpoints)) {
+        if (v) interviewResults[parseInt(k, 10)] = JSON.parse(v);
+      }
+
+      if (interviewCompleted > 0) {
+        await setProgress(jobId, jobStage("interview", "Virtual Interview", interviewCompleted, totalRows));
+      }
+
+      await runWithConcurrency(loopRows, CONCURRENCY, async (row, i) => {
+        if (String(i) in interviewCheckpoints) return;
+
+        const text = row.text;
         if (text.length > 50) {
-          const question = await ask("gpt-4o-mini", prompts.interviewQuestion(text), jobId, `Interview question ${i + 1}/${totalRows}`);
+          const question = await ask(
+            "gpt-4o-mini",
+            prompts.interviewQuestion(text),
+            jobId,
+            `Interview question ${i + 1}/${totalRows}`
+          );
           const summary = await ask(
             "gpt-4o-mini",
             prompts.interviewSummaryFromQuestion(question, text),
             jobId,
             `Interview summary ${i + 1}/${totalRows}`
           );
-          interviewItems.push({ question, summary });
+          const item = { question, summary };
+          interviewResults[i] = item;
+          await saveRowCheckpoint(jobId, "interview", i, JSON.stringify(item));
+        } else {
+          await saveRowCheckpoint(jobId, "interview", i, "");
         }
-        await setProgress(jobId, jobStage("interview", "Virtual Interview", i + 1, totalRows));
-      }
+
+        interviewCompleted++;
+        await setProgress(jobId, jobStage("interview", "Virtual Interview", interviewCompleted, totalRows));
+      });
+
+      const interviewItems = interviewResults.filter(
+        (it): it is { question: string; summary: string } => it !== null
+      );
       const interviewDoc = await buildVirtualInterviewDoc(interviewItems);
       zipEntries.push({ name: `${baseName} - Virtual Interview.docx`, data: Buffer.from(interviewDoc) });
     }
@@ -303,6 +436,11 @@ async function runJob(jobId: string) {
       downloadUrl: out.url,
       filename: `${baseName}.zip`,
     });
+
+    // Clean up checkpoint data now that the job is done (they expire in 24 h anyway).
+    if (sel.summary || sel.infographic) deleteRowCheckpoints(jobId, "summary").catch((e) => console.warn("Failed to delete summary checkpoints:", e));
+    if (sel.quiz) deleteRowCheckpoints(jobId, "quiz").catch((e) => console.warn("Failed to delete quiz checkpoints:", e));
+    if (sel.interview) deleteRowCheckpoints(jobId, "interview").catch((e) => console.warn("Failed to delete interview checkpoints:", e));
   } catch (err: unknown) {
     console.error("PROCESS JOB ERROR:", err);
     await failJob(jobId, err);
@@ -349,7 +487,9 @@ export async function POST(req: Request) {
     };
 
     const existing = await getJob(jobId);
-    if (existing?.status === "processing") {
+
+    // Block re-processing only if the job is actively processing AND not stale.
+    if (existing?.status === "processing" && !isStuckInProcessing(existing)) {
       return new Response(JSON.stringify({ error: "Job is already processing", jobId }), {
         status: 409,
         headers: { "Content-Type": "application/json" },
@@ -483,3 +623,4 @@ export async function GET(req: Request) {
 
   return new Response(s, { headers: sseHeaders() });
 }
+

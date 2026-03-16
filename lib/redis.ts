@@ -110,3 +110,44 @@ export function upsertProgress(
   p[item.key] = item;
   return p;
 }
+
+// ---------- Per-row checkpoint storage (used for resumable processing) ----------
+
+function checkpointKey(jobId: string, type: string) {
+  return `job:process:${jobId}:cp:${type}`;
+}
+
+/**
+ * Save a single row's result as a checkpoint so the job can resume after a
+ * timeout without reprocessing already-completed rows.
+ * @param value  JSON-serialisable result; pass an empty string for skipped rows.
+ */
+export async function saveRowCheckpoint(
+  jobId: string,
+  type: string,
+  index: number,
+  value: string,
+  ttlSeconds = 60 * 60 * 24
+) {
+  const key = checkpointKey(jobId, type);
+  await redis.hset(key, { [String(index)]: value });
+  await redis.expire(key, ttlSeconds);
+}
+
+/**
+ * Load all previously saved row checkpoints for a given output type.
+ * Returns a map of row-index → saved value string (may be "" for skipped rows).
+ */
+export async function loadRowCheckpoints(
+  jobId: string,
+  type: string
+): Promise<Record<string, string>> {
+  const key = checkpointKey(jobId, type);
+  const result = await redis.hgetall<Record<string, string>>(key);
+  return result ?? {};
+}
+
+/** Remove checkpoint data for a job/type (called after successful completion). */
+export async function deleteRowCheckpoints(jobId: string, type: string) {
+  await redis.del(checkpointKey(jobId, type));
+}

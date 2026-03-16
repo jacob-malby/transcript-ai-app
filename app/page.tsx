@@ -93,6 +93,11 @@ export default function Page() {
 
   const esRef = useRef<EventSource | null>(null);
   const downloadedOnceRef = useRef(false);
+  // Ref to always hold the latest blobUrl (needed for auto-retry inside event callbacks).
+  const blobUrlRef = useRef<string | null>(null);
+  useEffect(() => { blobUrlRef.current = blobUrl; }, [blobUrl]);
+  // Ref for the stuck-job detection timer so closeStream() can clear it.
+  const stuckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const onDrop = (accepted: File[]) => {
     const f = accepted[0];
@@ -224,6 +229,10 @@ export default function Page() {
   }
 
   function closeStream() {
+    if (stuckTimerRef.current !== null) {
+      clearInterval(stuckTimerRef.current);
+      stuckTimerRef.current = null;
+    }
     if (esRef.current) {
       esRef.current.close();
       esRef.current = null;
@@ -236,6 +245,30 @@ export default function Page() {
     const es = new EventSource(`/api/process?jobId=${encodeURIComponent(jobIdToUse)}&stream=1`);
     esRef.current = es;
 
+    // Track when we last received a meaningful event so we can detect a stuck job.
+    let lastEventMs = Date.now();
+    // Auto-retry: if the job appears stuck (no event for 5 min), re-POST to restart it.
+    const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
+    stuckTimerRef.current = setInterval(async () => {
+      if (Date.now() - lastEventMs < STUCK_THRESHOLD_MS) return;
+      clearInterval(stuckTimerRef.current!);
+      stuckTimerRef.current = null;
+      const url = blobUrlRef.current;
+      if (!url) return;
+      setStatusText("No progress detected — retrying job…");
+      try {
+        await fetch("/api/process", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId: jobIdToUse, blobUrl: url }),
+        });
+        // Give the server a moment to spin up, then reconnect the stream.
+        setTimeout(() => connectStream(jobIdToUse), 3000);
+      } catch (err) {
+        console.error("Auto-retry failed:", err);
+      }
+    }, 30000); // check every 30 s
+
     es.onopen = () => {
       setStatusText("Connected. Processing…");
     };
@@ -246,6 +279,7 @@ export default function Page() {
     };
 
     es.addEventListener("stage", (e: MessageEvent) => {
+      lastEventMs = Date.now();
       try {
         const data = JSON.parse(e.data);
         if (data?.label) setStatusText(String(data.label));
@@ -255,6 +289,7 @@ export default function Page() {
     });
 
     es.addEventListener("progress", (e: MessageEvent) => {
+      lastEventMs = Date.now();
       try {
         const data = JSON.parse(e.data);
         if (!data?.key) return;
@@ -283,6 +318,7 @@ export default function Page() {
     });
 
     es.addEventListener("done", (e: MessageEvent) => {
+      if (stuckTimerRef.current !== null) { clearInterval(stuckTimerRef.current); stuckTimerRef.current = null; }
       try {
         const data = JSON.parse(e.data);
         const dl = String(data.downloadUrl || "");

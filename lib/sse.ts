@@ -17,3 +17,8 @@ export function sseEvent(event: string, data: unknown) {
 export function sseComment(text: string) {
   return `: ${text}\n\n`;
 }
+
+// Tells the browser how long (ms) to wait before reconnecting after a dropped connection.
+export function sseRetry(ms: number) {
+  return `retry: ${ms}\n\n`;
+}
