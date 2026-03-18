@@ -37,4 +37,28 @@ The article should only be factual about the topic.
 
 CONTENT:
 ${combinedText}`,
+
+  aiAssistedTranscript: (text: string) =>
+    `You are a transcript editor. Lightly clean the following transcript text to make the grammar as clear as possible while STRICTLY preserving all of the speaker's original wording and phrasing. Follow these rules exactly:
+
+1. Do NOT change any words, expressions, or phrasing — only fix grammar where necessary to make the existing words make sense together.
+2. Use British spelling throughout (not American): use "s" not "z" (e.g. "recognise" not "recognize"), "viour" not "vior" (e.g. "behaviour"), "lour" not "lor" (e.g. "colour"), "vour" not "vor" (e.g. "favour"), "judgement" not "judgment".
+3. Do NOT use en-dashes (–) or em-dashes (—) anywhere.
+4. Replace ", and" with "and" (remove the comma before "and").
+5. Replace ", but" with "but" (remove the comma before "but").
+6. Replace ", or" with "or" (remove the comma before "or").
+7. Replace "'cause" with "because".
+8. Replace "gonna" with "going to".
+9. Replace "gotta" with "got to".
+10. Replace "wanna" with "want to".
+11. Replace "boutta" with "about to".
+12. Replace "outta" with "out of".
+13. Do not start sentences with "And" or "But" unless it is truly necessary for the sentence to make sense.
+14. When the speaker uses reported or mimicked speech (e.g. "and you're like, stop it" or "I was like, what?"), wrap the quoted/reported speech in double quotation marks (e.g. "and you're like "stop it"" or "I was like "what?"").
+15. Do NOT insert any line breaks. The entire output must be a single continuous paragraph with no newlines.
+
+Return only the cleaned text — no explanations, no labels, no extra content.
+
+TEXT:
+${text}`,
 };
