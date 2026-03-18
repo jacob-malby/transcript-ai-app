@@ -39,23 +39,42 @@ CONTENT:
 ${combinedText}`,
 
   aiAssistedTranscript: (text: string) =>
-    `You are a transcript editor. Lightly clean the following transcript text to make the grammar as clear as possible while STRICTLY preserving all of the speaker's original wording and phrasing. Follow these rules exactly:
+  `You are a transcript editor. Clean up the following transcript text to make the grammar, punctuation, and flow as clear as possible while STRICTLY preserving every single word the speaker used. You must not change, add, remove, or alter any words under any circumstances.
 
-1. Do NOT change any words, expressions, or phrasing — only fix grammar where necessary to make the existing words make sense together.
-2. Use British spelling throughout (not American): use "s" not "z" (e.g. "recognise" not "recognize"), "viour" not "vior" (e.g. "behaviour"), "lour" not "lor" (e.g. "colour"), "vour" not "vor" (e.g. "favour"), "judgement" not "judgment".
-3. Do NOT use en-dashes (–) or em-dashes (—) anywhere.
-4. Replace ", and" with "and" (remove the comma before "and").
-5. Replace ", but" with "but" (remove the comma before "but").
-6. Replace ", or" with "or" (remove the comma before "or").
-7. Replace "'cause" with "because".
-8. Replace "gonna" with "going to".
-9. Replace "gotta" with "got to".
-10. Replace "wanna" with "want to".
-11. Replace "boutta" with "about to".
-12. Replace "outta" with "out of".
-13. Do not start sentences with "And" or "But" unless it is truly necessary for the sentence to make sense.
-14. When the speaker uses reported or mimicked speech (e.g. "and you're like, stop it" or "I was like, what?"), wrap the quoted/reported speech in double quotation marks (e.g. "and you're like "stop it"" or "I was like "what?"").
-15. Do NOT insert any line breaks. The entire output must be a single continuous paragraph with no newlines.
+RULES TO FOLLOW:
+
+Word Preservation:
+1. Do NOT change any words, expressions, or phrasing under any circumstances.
+2. Do NOT add or remove any words.
+3. The only exceptions to word changes are the specific substitutions listed below.
+
+Filler Sounds and Verbal Crutches (REMOVE THESE):
+4. Remove all filler sounds: "umm", "um", "hmm", "hmmm", "uh", "er", "erm", "ah", "uh-huh", "mmm", "mmmm", "mm", etc.
+5. These fillers often appear mid-sentence or between clauses and should be deleted entirely with no replacement.
+
+Specific Word/Phrase Substitutions (ONLY these changes allowed):
+6. Replace "'cause" with "because".
+7. Replace "gonna" with "going to".
+8. Replace "gotta" with "got to".
+9. Replace "wanna" with "want to".
+10. Replace "boutta" with "about to".
+11. Replace "outta" with "out of".
+
+Punctuation and Spacing:
+12. Use British spelling throughout (not American): use "s" not "z" (e.g. "recognise" not "recognize"), "viour" not "vior" (e.g. "behaviour"), "lour" not "lor" (e.g. "colour"), "vour" not "vor" (e.g. "favour"), "judgement" not "judgment".
+13. Do NOT use en-dashes (–) or em-dashes (—) anywhere.
+14. Remove commas before conjunctions: replace ", and" with " and", ", but" with " but", ", or" with " or".
+15. Add necessary commas for clarity where sentences are complex or have multiple clauses, but only where grammatically required.
+16. Fix run-on sentences by adding appropriate punctuation (periods, semicolons, colons) without changing words.
+17. Ensure proper capitalization at the start of sentences and for proper nouns.
+
+Sentence Structure:
+18. Do not start sentences with "And" or "But" unless absolutely necessary for the sentence to make sense.
+19. When the speaker uses reported or mimicked speech (e.g. "and you're like, stop it" or "I was like, what?"), wrap the quoted/reported speech in double quotation marks (e.g. "and you're like \"stop it\"" or "I was like \"what?\"").
+20. Fix sentence fragments by connecting them with appropriate punctuation, but never by changing or adding words.
+
+Formatting:
+21. Do NOT insert any line breaks. The entire output must be a single continuous paragraph with no newlines.
 
 Return only the cleaned text — no explanations, no labels, no extra content.
 
