@@ -1,11 +1,29 @@
-const prompts = {
-  quizQuestion: 'What is the capital of France?',
-  quizTorF: 'Is the earth flat? (true/false)',
-  quizWrongAnswers: ['Paris', 'London', 'Berlin'],
-  summarize2Sentences: 'Summarize the following text in two sentences.',
-  interviewQuestion: 'What are your strengths?',
-  interviewSummaryFromQuestion: 'Provide a summary based on the interview question.',
-  infographicTips: 'Provide tips for creating an infographic.',
-  blogPost: 'Write a blog post about the importance of clean energy.',
-  aiAssistedTranscript: (text: string) =>
-    `You are a transcript editor. Clean up the following transcript text to make the grammar, punctuation, and flow as clear as possible while STRICTLY preserving every single word the speaker used. You must not change, add, remove, or alter any words under any circumstances.\n\nRULES TO FOLLOW:\n\nWord Preservation:\n1. Do NOT change any words, expressions, or phrasing under any circumstances.\n2. Do NOT add or remove any words.\n3. The only exceptions to word changes are the specific substitutions listed below.\n\nFiller Sounds and Verbal Crutches (REMOVE THESE):\n4. Remove all filler sounds: "umm", "um", "hmm", "hmmm", "uh", "er", "erm", "ah", "uh-huh", "mmm", "mmmm", "mm", etc.\n5. These fillers often appear mid-sentence or between clauses and should be deleted entirely with no replacement.\n\nSpecific Word/Phrase Substitutions (ONLY these changes allowed):\n6. Replace "'cause" with "because".\n7. Replace "gonna" with "going to".\n8. Replace "gotta" with "got to".\n9. Replace "wanna" with "want to".\n10. Replace "boutta" with "about to".\n11. Replace "outta" with "out of".\n\nPunctuation and Spacing:\n12. Use British spelling throughout (not American): use "s" not "z" (e.g. "recognise" not "recognize"), "viour" not "vior" (e.g. "behaviour"), "lour" not "lor" (e.g. "colour"), "vour" not "vor" (e.g. "favour"), "judgement" not "judgment".\n13. Do NOT use en-dashes (–) or em-dashes (—) anywhere.\n14. Remove commas before conjunctions: replace ", and" with " and", ", but" with " but", ", or" with " or".\n15. Add necessary commas for clarity where sentences are complex or have multiple clauses, but only where grammatically required.\n16. Fix run-on sentences by adding appropriate punctuation (periods, semicolons, colons) without changing words.\n17. Ensure proper capitalization at the start of sentences and for proper nouns.\n\nSentence Structure:\n18. Do not start sentences with "And" or "But" unless absolutely necessary for the sentence to make sense.\n19. When the speaker uses reported or mimicked speech (e.g. "and you're like, stop it" or "I was like, what?"), wrap the quoted/reported speech in double quotation marks (e.g. "and you're like \"stop it\"" or "I was like \"what?\"").\n20. Fix sentence fragments by connecting them with appropriate punctuation, but never by changing or adding words.\n\nFormatting:\n21. Do NOT insert any line breaks. The entire output must be a single continuous paragraph with no newlines.\n\nReturn only the cleaned text — no explanations, no labels, no extra content.\n\nTEXT:\n${text}`,
+export const prompts = {
+  quizQuestion: function(question) {
+    // implementation
+  },
+  quizTorF: function(question) {
+    // implementation
+  },
+  quizWrongAnswers: function(question) {
+    // implementation
+  },
+  summarize2Sentences: function(text) {
+    // implementation
+  },
+  interviewQuestion: function(topic) {
+    // implementation
+  },
+  interviewSummaryFromQuestion: function(question) {
+    // implementation
+  },
+  infographicTips: function(topic) {
+    // implementation
+  },
+  blogPost: function(topic) {
+    // implementation
+  },
+  aiAssistedTranscript: function(transcript) {
+    // implementation
+  }
+};
